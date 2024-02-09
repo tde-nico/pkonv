@@ -2,8 +2,12 @@ package main
 
 import (
 	"compress/gzip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -16,14 +20,62 @@ var (
 	dec  bool
 	ng   bool
 	newg bool
+	ekey []byte
+	dkey []byte
 )
+
+func encryptWriter(writer io.Writer) (io.Writer, error) {
+	block, err := aes.NewCipher(ekey)
+	if err != nil {
+		return nil, err
+	}
+
+	iv := make([]byte, aes.BlockSize)
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, err
+	}
+
+	if _, err := writer.Write(iv); err != nil {
+		return nil, err
+	}
+
+	stream := cipher.NewCFBEncrypter(block, iv)
+	return &cipher.StreamWriter{S: stream, W: writer}, nil
+}
+
+func decryptReader(reader io.Reader) (io.Reader, error) {
+	block, err := aes.NewCipher(dkey)
+	if err != nil {
+		return nil, err
+	}
+
+	iv := make([]byte, aes.BlockSize)
+	if _, err := io.ReadFull(reader, iv); err != nil {
+		return nil, err
+	}
+
+	stream := cipher.NewCFBDecrypter(block, iv)
+	return &cipher.StreamReader{S: stream, R: reader}, nil
+}
 
 func convert(f *os.File, out *os.File) error {
 	var err error
 
+	var dReader io.Reader
+	if len(dkey) != 0 {
+		dReader, err = decryptReader(f)
+		if err != nil {
+			log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
+		}
+	}
+
 	var gzReader *gzip.Reader
 	if dec {
-		gzReader, err = gzip.NewReader(f)
+		if len(dkey) != 0 {
+			gzReader, err = gzip.NewReader(dReader)
+		} else {
+			gzReader, err = gzip.NewReader(f)
+		}
 		if err != nil {
 			log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
 		}
@@ -40,18 +92,38 @@ func convert(f *os.File, out *os.File) error {
 		}
 	} else {
 		if newg {
-			ngIn, err = pcapgo.NewNgReader(f, pcapgo.NgReaderOptions{})
+			if len(dkey) != 0 {
+				ngIn, err = pcapgo.NewNgReader(dReader, pcapgo.NgReaderOptions{})
+			} else {
+				ngIn, err = pcapgo.NewNgReader(f, pcapgo.NgReaderOptions{})
+			}
 		} else {
-			in, err = pcapgo.NewReader(f)
+			if len(dkey) != 0 {
+				in, err = pcapgo.NewReader(dReader)
+			} else {
+				in, err = pcapgo.NewReader(f)
+			}
 		}
 	}
 	if err != nil {
 		log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
 	}
 
+	var eWriter io.Writer
+	if len(ekey) != 0 {
+		eWriter, err = encryptWriter(out)
+		if err != nil {
+			log.Fatalf("Error writing %v 'out' file: %v\n", out.Name(), err)
+		}
+	}
+
 	var gzWriter *gzip.Writer
 	if zip {
-		gzWriter = gzip.NewWriter(out)
+		if len(ekey) != 0 {
+			gzWriter = gzip.NewWriter(eWriter)
+		} else {
+			gzWriter = gzip.NewWriter(out)
+		}
 		defer gzWriter.Close()
 	}
 
@@ -66,9 +138,17 @@ func convert(f *os.File, out *os.File) error {
 			}
 		} else {
 			if newg {
-				ngWriter, err = pcapgo.NewNgWriter(out, ngIn.LinkType())
+				if len(ekey) != 0 {
+					ngWriter, err = pcapgo.NewNgWriter(eWriter, ngIn.LinkType())
+				} else {
+					ngWriter, err = pcapgo.NewNgWriter(out, ngIn.LinkType())
+				}
 			} else {
-				ngWriter, err = pcapgo.NewNgWriter(out, in.LinkType())
+				if len(ekey) != 0 {
+					ngWriter, err = pcapgo.NewNgWriter(eWriter, in.LinkType())
+				} else {
+					ngWriter, err = pcapgo.NewNgWriter(out, in.LinkType())
+				}
 			}
 		}
 		if err != nil {
@@ -79,7 +159,11 @@ func convert(f *os.File, out *os.File) error {
 		if zip {
 			writer = pcapgo.NewWriter(gzWriter)
 		} else {
-			writer = pcapgo.NewWriter(out)
+			if len(ekey) != 0 {
+				writer = pcapgo.NewWriter(eWriter)
+			} else {
+				writer = pcapgo.NewWriter(out)
+			}
 		}
 		if newg {
 			if err := writer.WriteFileHeader(262144, ngIn.LinkType()); err != nil {
@@ -140,12 +224,16 @@ func start(fname, outname string) {
 func main() {
 	var fname string
 	var outname string
+	var ekeyStr string
+	var dkeyStr string
 
 	flag.StringVar(&fname, "f", "", "pcap file to convert")
 	flag.StringVar(&outname, "o", "", "output file")
 	flag.BoolVar(&zip, "z", false, "set for compressed output")
 	flag.BoolVar(&dec, "d", false, "set for decompressed output")
 	flag.BoolVar(&ng, "ng", false, "set for pcapng output")
+	flag.StringVar(&ekeyStr, "ek", "", "AES key for encryption")
+	flag.StringVar(&dkeyStr, "dk", "", "AES key for decryption")
 	flag.Parse()
 
 	if fname == "" {
@@ -153,7 +241,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	if fname[len(fname)-3:] == ".gz" {
+	if len(ekeyStr) != 0 {
+		if len(ekeyStr) != 16 {
+			log.Fatalf("Error: Key length must be 16 bytes\n")
+		}
+		ekey = []byte(ekeyStr)
+	}
+	if len(dkeyStr) != 0 {
+		if len(dkeyStr) != 16 {
+			log.Fatalf("Error: Key length must be 16 bytes\n")
+		}
+		dkey = []byte(dkeyStr)
+	}
+
+	if fname[len(fname)-4:] == ".aes" {
+		if fname[len(fname)-7:len(fname)-4] == ".gz" {
+			if fname[len(fname)-9:len(fname)-7] == "ng" {
+				newg = true
+			}
+		}
+	} else if fname[len(fname)-3:] == ".gz" {
 		if fname[len(fname)-5:len(fname)-3] == "ng" {
 			newg = true
 		}
