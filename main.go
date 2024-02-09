@@ -35,19 +35,15 @@ func convert(f *os.File, out *os.File) error {
 	if dec {
 		if newg {
 			ngIn, err = pcapgo.NewNgReader(gzReader, pcapgo.NgReaderOptions{})
-			if err != nil {
-				log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
-			}
+		} else {
+			in, err = pcapgo.NewReader(gzReader)
 		}
-		in, err = pcapgo.NewReader(gzReader)
 	} else {
 		if newg {
 			ngIn, err = pcapgo.NewNgReader(f, pcapgo.NgReaderOptions{})
-			if err != nil {
-				log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
-			}
+		} else {
+			in, err = pcapgo.NewReader(f)
 		}
-		in, err = pcapgo.NewReader(f)
 	}
 	if err != nil {
 		log.Fatalf("Error reading %v 'in' file: %v\n", f.Name(), err)
@@ -63,9 +59,17 @@ func convert(f *os.File, out *os.File) error {
 	var writer *pcapgo.Writer
 	if ng {
 		if zip {
-			ngWriter, err = pcapgo.NewNgWriter(gzWriter, in.LinkType())
+			if newg {
+				ngWriter, err = pcapgo.NewNgWriter(gzWriter, ngIn.LinkType())
+			} else {
+				ngWriter, err = pcapgo.NewNgWriter(gzWriter, in.LinkType())
+			}
 		} else {
-			ngWriter, err = pcapgo.NewNgWriter(out, in.LinkType())
+			if newg {
+				ngWriter, err = pcapgo.NewNgWriter(out, ngIn.LinkType())
+			} else {
+				ngWriter, err = pcapgo.NewNgWriter(out, in.LinkType())
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("error creating file: %v", err)
@@ -77,8 +81,14 @@ func convert(f *os.File, out *os.File) error {
 		} else {
 			writer = pcapgo.NewWriter(out)
 		}
-		if err := writer.WriteFileHeader(in.Snaplen(), in.LinkType()); err != nil {
-			return fmt.Errorf("error writing file header: %v", err)
+		if newg {
+			if err := writer.WriteFileHeader(262144, ngIn.LinkType()); err != nil {
+				return fmt.Errorf("error writing file header: %v", err)
+			}
+		} else {
+			if err := writer.WriteFileHeader(in.Snaplen(), in.LinkType()); err != nil {
+				return fmt.Errorf("error writing file header: %v", err)
+			}
 		}
 	}
 
@@ -142,6 +152,7 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
 	if fname[len(fname)-3:] == ".gz" {
 		if fname[len(fname)-5:len(fname)-3] == "ng" {
 			newg = true
