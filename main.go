@@ -270,10 +270,12 @@ func main() {
 		}
 	}
 	if outname == "" {
-		if fname[len(fname)-3:] == ".gz" {
-			outname = fname[:len(fname)-3]
-		} else {
-			outname = fname
+		outname = fname
+		if outname[len(outname)-4:] == ".aes" {
+			outname = outname[:len(outname)-4]
+		}
+		if outname[len(outname)-3:] == ".gz" {
+			outname = outname[:len(outname)-3]
 		}
 		if outname[len(outname)-2:] == "ng" && ng {
 			outname = outname[:len(outname)-2]
@@ -283,6 +285,9 @@ func main() {
 		}
 		if zip {
 			outname += ".gz"
+		}
+		if len(ekey) != 0 {
+			outname += ".aes"
 		}
 	}
 
